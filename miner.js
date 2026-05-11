@@ -118,7 +118,11 @@ function render() {
       fmtDuration(elapsed) + " · ETA ~" + fmtDuration(eta),
     "",
   ];
-  process.stdout.write("\x1b[H\x1b[J" + lines.join("\n"));
+  if (process.env.NO_CLEAR === "1") {
+    process.stdout.write(lines.join("\n") + "\n");
+  } else {
+    process.stdout.write("\x1b[H\x1b[J" + lines.join("\n"));
+  }
 }
 
 async function main() {
