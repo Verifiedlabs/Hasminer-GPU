@@ -32,42 +32,83 @@ __device__ __forceinline__ u64 bswap64(u64 x) {
     return x;
 }
 
-__device__ __forceinline__ void keccak_f(u64 *s) {
+__device__ __forceinline__ void keccak_f(u64 *st) {
+    u64 s0=st[0],s1=st[1],s2=st[2],s3=st[3],s4=st[4];
+    u64 s5=st[5],s6=st[6],s7=st[7],s8=st[8],s9=st[9];
+    u64 s10=st[10],s11=st[11],s12=st[12],s13=st[13],s14=st[14];
+    u64 s15=st[15],s16=st[16],s17=st[17],s18=st[18],s19=st[19];
+    u64 s20=st[20],s21=st[21],s22=st[22],s23=st[23],s24=st[24];
+
     #pragma unroll
     for (int r = 0; r < 24; r++) {
-        u64 bc[5];
-        #pragma unroll
-        for (int i = 0; i < 5; i++)
-            bc[i] = s[i] ^ s[i+5] ^ s[i+10] ^ s[i+15] ^ s[i+20];
+        u64 bc0 = s0 ^ s5 ^ s10 ^ s15 ^ s20;
+        u64 bc1 = s1 ^ s6 ^ s11 ^ s16 ^ s21;
+        u64 bc2 = s2 ^ s7 ^ s12 ^ s17 ^ s22;
+        u64 bc3 = s3 ^ s8 ^ s13 ^ s18 ^ s23;
+        u64 bc4 = s4 ^ s9 ^ s14 ^ s19 ^ s24;
 
-        #pragma unroll
-        for (int i = 0; i < 5; i++) {
-            u64 d = bc[(i+4) % 5] ^ ROL64(bc[(i+1) % 5], 1);
-            s[i]    ^= d; s[i+5]  ^= d; s[i+10] ^= d;
-            s[i+15] ^= d; s[i+20] ^= d;
-        }
+        u64 d0 = bc4 ^ ROL64(bc1, 1);
+        u64 d1 = bc0 ^ ROL64(bc2, 1);
+        u64 d2 = bc1 ^ ROL64(bc3, 1);
+        u64 d3 = bc2 ^ ROL64(bc4, 1);
+        u64 d4 = bc3 ^ ROL64(bc0, 1);
 
-        u64 t = s[1];
-        #pragma unroll
-        for (int i = 0; i < 24; i++) {
-            int j = PILN[i];
-            u64 tmp = s[j];
-            s[j] = ROL64(t, ROTC[i]);
-            t = tmp;
-        }
+        u64 n0  = s0  ^ d0;
+        u64 n1  = ROL64(s6  ^ d1, 44);
+        u64 n2  = ROL64(s12 ^ d2, 43);
+        u64 n3  = ROL64(s18 ^ d3, 21);
+        u64 n4  = ROL64(s24 ^ d4, 14);
+        u64 n5  = ROL64(s3  ^ d3, 28);
+        u64 n6  = ROL64(s9  ^ d4, 20);
+        u64 n7  = ROL64(s10 ^ d0, 3);
+        u64 n8  = ROL64(s16 ^ d1, 45);
+        u64 n9  = ROL64(s22 ^ d2, 61);
+        u64 n10 = ROL64(s1  ^ d1, 1);
+        u64 n11 = ROL64(s7  ^ d2, 6);
+        u64 n12 = ROL64(s13 ^ d3, 25);
+        u64 n13 = ROL64(s19 ^ d4, 8);
+        u64 n14 = ROL64(s20 ^ d0, 18);
+        u64 n15 = ROL64(s4  ^ d4, 27);
+        u64 n16 = ROL64(s5  ^ d0, 36);
+        u64 n17 = ROL64(s11 ^ d1, 10);
+        u64 n18 = ROL64(s17 ^ d2, 15);
+        u64 n19 = ROL64(s23 ^ d3, 56);
+        u64 n20 = ROL64(s2  ^ d2, 62);
+        u64 n21 = ROL64(s8  ^ d3, 55);
+        u64 n22 = ROL64(s14 ^ d4, 39);
+        u64 n23 = ROL64(s15 ^ d0, 41);
+        u64 n24 = ROL64(s21 ^ d1, 2);
 
-        #pragma unroll
-        for (int j = 0; j < 25; j += 5) {
-            u64 a0 = s[j], a1 = s[j+1], a2 = s[j+2], a3 = s[j+3], a4 = s[j+4];
-            s[j]   = a0 ^ (~a1 & a2);
-            s[j+1] = a1 ^ (~a2 & a3);
-            s[j+2] = a2 ^ (~a3 & a4);
-            s[j+3] = a3 ^ (~a4 & a0);
-            s[j+4] = a4 ^ (~a0 & a1);
-        }
+        s0  = n0  ^ (~n1  & n2);
+        s1  = n1  ^ (~n2  & n3);
+        s2  = n2  ^ (~n3  & n4);
+        s3  = n3  ^ (~n4  & n0);
+        s4  = n4  ^ (~n0  & n1);
+        s5  = n5  ^ (~n6  & n7);
+        s6  = n6  ^ (~n7  & n8);
+        s7  = n7  ^ (~n8  & n9);
+        s8  = n8  ^ (~n9  & n5);
+        s9  = n9  ^ (~n5  & n6);
+        s10 = n10 ^ (~n11 & n12);
+        s11 = n11 ^ (~n12 & n13);
+        s12 = n12 ^ (~n13 & n14);
+        s13 = n13 ^ (~n14 & n10);
+        s14 = n14 ^ (~n10 & n11);
+        s15 = n15 ^ (~n16 & n17);
+        s16 = n16 ^ (~n17 & n18);
+        s17 = n17 ^ (~n18 & n19);
+        s18 = n18 ^ (~n19 & n15);
+        s19 = n19 ^ (~n15 & n16);
+        s20 = n20 ^ (~n21 & n22);
+        s21 = n21 ^ (~n22 & n23);
+        s22 = n22 ^ (~n23 & n24);
+        s23 = n23 ^ (~n24 & n20);
+        s24 = n24 ^ (~n20 & n21);
 
-        s[0] ^= RC[r];
+        s0 ^= RC[r];
     }
+
+    st[0]=s0;  st[1]=s1;  st[2]=s2;  st[3]=s3;  st[4]=s4;
 }
 
 struct Result {
