@@ -15,6 +15,35 @@ if (!fs.existsSync(BINARY)) {
 }
 
 const NUM_GPUS = parseInt(process.env.NUM_GPUS || "1");
+const FLASHBOTS_RELAY = process.env.FLASHBOTS_RELAY || "https://relay.flashbots.net";
+const USE_BUNDLE = process.env.USE_BUNDLE !== "false";
+
+const flashbotsAuthKey = process.env.FLASHBOTS_AUTH_KEY || ethers.Wallet.createRandom().privateKey;
+const flashbotsAuthWallet = new ethers.Wallet(flashbotsAuthKey);
+
+async function sendBundle(signedTx, targetBlock) {
+  const body = JSON.stringify({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "eth_sendBundle",
+    params: [{
+      txs: [signedTx],
+      blockNumber: "0x" + targetBlock.toString(16),
+    }],
+  });
+  const sig = await flashbotsAuthWallet.signMessage(ethers.id(body).slice(2));
+  const signature = flashbotsAuthWallet.address + ":" + sig;
+
+  const res = await fetch(FLASHBOTS_RELAY, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Flashbots-Signature": signature,
+    },
+    body,
+  });
+  return await res.json();
+}
 
 function fmtHashrate(hps) {
   if (hps >= 1e9) return (hps / 1e9).toFixed(2) + " GH/s";
@@ -120,7 +149,8 @@ async function main() {
   console.log("  address:    ", readWallet.address);
   console.log("  gpus:       ", NUM_GPUS);
   console.log("  read rpc:   ", process.env.RPC_URL || "fallback");
-  console.log("  submit rpc: ", submitRpc);
+  console.log("  submit:     ", USE_BUNDLE ? "Flashbots Bundle (eth_sendBundle)" : "Flashbots Protect");
+  if (USE_BUNDLE) console.log("  fb auth:    ", flashbotsAuthWallet.address);
   console.log("─".repeat(60));
   await new Promise(r => setTimeout(r, 1000));
 
@@ -192,15 +222,53 @@ async function run(readContract, submitContract, wallet, provider) {
           const priorityFee = ethers.parseUnits(tipGwei, "gwei");
           const baseFee = feeData.maxFeePerGas || 0n;
           const maxFeePerGas = baseFee > priorityFee ? baseFee : priorityFee * 2n;
-          const tx = await submitContract.mine(BigInt("0x" + nonce), {
-            gasLimit: 300000n,
-            maxFeePerGas,
-            maxPriorityFeePerGas: priorityFee,
-          });
-          state.tx = tx.hash;
-          render();
-          const receipt = await tx.wait();
-          state.status = "confirmed in block " + receipt.blockNumber;
+
+          let txHash;
+          if (USE_BUNDLE) {
+            const nonceNum = await provider.getTransactionCount(wallet.address);
+            const chainId = 1;
+            const txReq = {
+              type: 2,
+              chainId,
+              to: CONTRACT,
+              nonce: nonceNum,
+              gasLimit: 300000n,
+              maxFeePerGas,
+              maxPriorityFeePerGas: priorityFee,
+              data: submitContract.interface.encodeFunctionData("mine", [BigInt("0x" + nonce)]),
+              value: 0n,
+            };
+            const signedTx = await wallet.signTransaction(txReq);
+            const blockNum = await provider.getBlockNumber();
+            const result = await sendBundle(signedTx, blockNum + 1);
+            if (result.error) throw new Error(JSON.stringify(result.error));
+            txHash = ethers.keccak256(signedTx);
+            state.tx = txHash + " (bundle)";
+            render();
+            let included = false;
+            for (let attempt = 0; attempt < 10; attempt++) {
+              await new Promise(r => setTimeout(r, 3000));
+              const receipt = await provider.getTransactionReceipt(txHash);
+              if (receipt && receipt.blockNumber) {
+                state.status = "confirmed in block " + receipt.blockNumber;
+                included = true;
+                break;
+              }
+            }
+            if (!included) {
+              state.status = "bundle not included in next block";
+            }
+          } else {
+            const tx = await submitContract.mine(BigInt("0x" + nonce), {
+              gasLimit: 300000n,
+              maxFeePerGas,
+              maxPriorityFeePerGas: priorityFee,
+            });
+            state.tx = tx.hash;
+            render();
+            const receipt = await tx.wait();
+            state.status = "confirmed in block " + receipt.blockNumber;
+          }
           const s = await fetchState(readContract, wallet.address);
           applyState(s);
           lastEpoch = s.epoch;
