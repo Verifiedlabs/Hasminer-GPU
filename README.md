@@ -96,7 +96,31 @@ PRIVATE_KEY=0xPRIVATE_KEY_HOT_WALLET_KAMU
 RPC_URL=https://ethereum.publicnode.com
 ```
 
-> **PENTING**: Gunakan hot wallet khusus mining, bukan wallet utama. Wallet ini butuh sedikit ETH untuk gas fee saat submit mint transaction.
+**Cara dapat PRIVATE_KEY:**
+- Buka MetaMask → klik nama akun → Account Details → Show Private Key
+- Atau wallet lain: cari menu "Export Private Key"
+- Format: `0x` diikuti 64 karakter hex, contoh: `0xabc123...def456`
+- **Gunakan hot wallet baru khusus mining, BUKAN wallet utama kamu**
+- Transfer ETH secukupnya ke wallet itu untuk gas (cukup 0.01-0.05 ETH)
+
+**Pilihan RPC_URL (gratis, pilih salah satu):**
+
+| RPC | URL | Keterangan |
+|-----|-----|------------|
+| PublicNode | `https://ethereum.publicnode.com` | Gratis, cukup stabil |
+| Cloudflare | `https://cloudflare-eth.com` | Gratis, cepat |
+| Ankr | `https://rpc.ankr.com/eth` | Gratis, rate limit longgar |
+| Alchemy | `https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY` | Daftar gratis di alchemy.com, paling stabil |
+| Infura | `https://mainnet.infura.io/v3/YOUR_KEY` | Daftar gratis di infura.io |
+
+Untuk mining serius, pakai Alchemy atau Infura (daftar gratis, dapat API key dalam 2 menit). Public RPC kadang rate-limit kalau terlalu sering query.
+
+**Cara daftar Alchemy (gratis):**
+1. Buka https://alchemy.com → Sign Up
+2. Create App → Network: Ethereum Mainnet
+3. Copy API key → masukkan ke `RPC_URL=https://eth-mainnet.g.alchemy.com/v2/API_KEY_KAMU`
+
+> **PENTING**: Jangan pernah share atau commit file `.env`. Private key yang bocor = wallet bisa dikuras.
 
 ### 5. Jalankan miner
 
