@@ -25,6 +25,23 @@ __constant__ int PILN[24] = {10,7,11,17,18,3,5,16,8,21,24,4,15,23,19,13,12,2,20,
 
 #define ROL64(x,n) (((x)<<(n))|((x)>>(64-(n))))
 
+__device__ __forceinline__ uint64_t rotl64(uint64_t x, int n) {
+    uint32_t lo = (uint32_t)x;
+    uint32_t hi = (uint32_t)(x >> 32);
+    uint32_t rlo, rhi;
+    if (n < 32) {
+        rlo = __funnelshift_l(hi, lo, n);
+        rhi = __funnelshift_l(lo, hi, n);
+    } else {
+        rlo = __funnelshift_l(lo, hi, n - 32);
+        rhi = __funnelshift_l(hi, lo, n - 32);
+    }
+    return ((uint64_t)rhi << 32) | rlo;
+}
+
+#undef ROL64
+#define ROL64(x,n) rotl64((x), (n))
+
 __device__ __forceinline__ u64 bswap64(u64 x) {
     x = ((x & 0x00FF00FF00FF00FFULL) << 8)  | ((x & 0xFF00FF00FF00FF00ULL) >> 8);
     x = ((x & 0x0000FFFF0000FFFFULL) << 16) | ((x & 0xFFFF0000FFFF0000ULL) >> 16);
