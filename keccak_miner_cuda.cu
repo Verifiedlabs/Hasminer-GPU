@@ -33,7 +33,7 @@ __device__ __forceinline__ u64 bswap64(u64 x) {
 }
 
 __device__ __forceinline__ void keccak_f(u64 *s) {
-    #pragma unroll 1
+    #pragma unroll
     for (int r = 0; r < 24; r++) {
         u64 bc[5];
         #pragma unroll
