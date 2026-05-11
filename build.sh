@@ -17,4 +17,10 @@ echo "Using GPU architecture: $GPU_ARCH"
 
 nvcc -O3 -arch=$GPU_ARCH -o keccak_miner_cuda keccak_miner_cuda.cu
 
-echo "Done. Run: node miner.js"
+NUM_GPUS=$(nvidia-smi --list-gpus 2>/dev/null | wc -l)
+if [ "$NUM_GPUS" -gt 0 ]; then
+  echo "Detected $NUM_GPUS GPU(s)."
+  echo "Run with: NUM_GPUS=$NUM_GPUS node miner.js"
+else
+  echo "Run with: node miner.js"
+fi

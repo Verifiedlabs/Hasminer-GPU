@@ -4,6 +4,8 @@ const path = require("path");
 const fs = require("fs");
 const ABI = require("./abi");
 
+try { require("dotenv").config(); } catch {}
+
 const CONTRACT = "0xAC7b5d06fa1e77D08aea40d46cB7C5923A87A0cc";
 const BINARY = path.join(__dirname, "keccak_miner_cuda");
 
@@ -11,6 +13,8 @@ if (!fs.existsSync(BINARY)) {
   console.error("keccak_miner_cuda binary not found. Run ./build.sh first.");
   process.exit(1);
 }
+
+const NUM_GPUS = parseInt(process.env.NUM_GPUS || "1");
 
 function fmtHashrate(hps) {
   if (hps >= 1e9) return (hps / 1e9).toFixed(2) + " GH/s";
@@ -114,6 +118,7 @@ async function main() {
   console.log("  hash256 GPU miner (CUDA)");
   console.log("─".repeat(60));
   console.log("  address:    ", readWallet.address);
+  console.log("  gpus:       ", NUM_GPUS);
   console.log("  read rpc:   ", process.env.RPC_URL || "fallback");
   console.log("  submit rpc: ", submitRpc);
   console.log("─".repeat(60));
@@ -149,10 +154,85 @@ async function run(readContract, submitContract, wallet, provider) {
   state.totalHashes = 0;
   render();
 
-  const proc = spawn(BINARY, [initial.challenge, "0x" + state.targetHex]);
+  const workers = [];
+  const hashrates = new Array(NUM_GPUS).fill(0);
 
   let submitting = false;
   let lastEpoch = state.epoch;
+
+  for (let gpu = 0; gpu < NUM_GPUS; gpu++) {
+    const proc = spawn(BINARY, [initial.challenge, "0x" + state.targetHex], {
+      env: { ...process.env, CUDA_VISIBLE_DEVICES: String(gpu) }
+    });
+
+    proc.stdout.on("data", async (data) => {
+      for (const line of data.toString().split("\n")) {
+        if (!line.startsWith("FOUND:")) continue;
+        if (submitting) continue;
+        submitting = true;
+        const nonce = line.slice(6);
+        state.status = "submitting (gpu " + gpu + ")";
+        render();
+        try {
+          const currentState = await readContract.miningState();
+          if (currentState[5].toString() !== state.epoch.toString()) {
+            state.status = "epoch rotated before submit, skipping";
+            submitting = false;
+            const s = await fetchState(readContract, wallet.address);
+            applyState(s);
+            lastEpoch = s.epoch;
+            broadcastUpdate(workers, s.challenge, state.targetHex);
+            state.totalHashes = 0;
+            state.searchStart = Date.now();
+            state.status = "searching";
+            return;
+          }
+          const feeData = await provider.getFeeData();
+          const tipGwei = process.env.TIP_GWEI || "15";
+          const priorityFee = ethers.parseUnits(tipGwei, "gwei");
+          const baseFee = feeData.maxFeePerGas || 0n;
+          const maxFeePerGas = baseFee > priorityFee ? baseFee : priorityFee * 2n;
+          const tx = await submitContract.mine(BigInt("0x" + nonce), {
+            gasLimit: 300000n,
+            maxFeePerGas,
+            maxPriorityFeePerGas: priorityFee,
+          });
+          state.tx = tx.hash;
+          render();
+          const receipt = await tx.wait();
+          state.status = "confirmed in block " + receipt.blockNumber;
+          const s = await fetchState(readContract, wallet.address);
+          applyState(s);
+          lastEpoch = s.epoch;
+        } catch (err) {
+          state.status = "error: " + (err.shortMessage || err.message);
+        }
+        submitting = false;
+        broadcastUpdate(workers, state.challenge, state.targetHex);
+        state.totalHashes = 0;
+        state.searchStart = Date.now();
+        state.status = "searching";
+      }
+    });
+
+    proc.stderr.on("data", (data) => {
+      for (const line of data.toString().split("\n")) {
+        if (line.startsWith("PROGRESS:")) {
+          const parts = line.split(":");
+          hashrates[gpu] = parseInt(parts[2]);
+          state.hashrate = hashrates.reduce((a, b) => a + b, 0);
+          state.totalHashes = state.hashrate * ((Date.now() - state.searchStart) / 1000);
+        }
+      }
+    });
+
+    proc.on("exit", () => {
+      console.log("\nminer gpu " + gpu + " exited");
+      process.exit(1);
+    });
+
+    workers.push(proc);
+  }
 
   const renderTimer = setInterval(render, 500);
 
@@ -162,79 +242,19 @@ async function run(readContract, submitContract, wallet, provider) {
       applyState(s);
       if (s.epoch.toString() !== lastEpoch.toString() && !submitting) {
         lastEpoch = s.epoch;
-        proc.stdin.write("UPDATE 0x" + s.challenge.slice(2) + " 0x" + state.targetHex + "\n");
+        broadcastUpdate(workers, s.challenge, state.targetHex);
         state.totalHashes = 0;
         state.searchStart = Date.now();
       }
     } catch {}
   }, 12000);
+}
 
-  proc.stdout.on("data", async (data) => {
-    for (const line of data.toString().split("\n")) {
-      if (!line.startsWith("FOUND:")) continue;
-      if (submitting) continue;
-      submitting = true;
-      const nonce = line.slice(6);
-      state.status = "submitting";
-      render();
-      try {
-        const currentState = await readContract.miningState();
-        if (currentState[5].toString() !== state.epoch.toString()) {
-          state.status = "epoch rotated before submit, skipping";
-          submitting = false;
-          const s = await fetchState(readContract, wallet.address);
-          applyState(s);
-          lastEpoch = s.epoch;
-          proc.stdin.write("UPDATE 0x" + s.challenge.slice(2) + " 0x" + state.targetHex + "\n");
-          state.totalHashes = 0;
-          state.searchStart = Date.now();
-          state.status = "searching";
-          return;
-        }
-        const feeData = await provider.getFeeData();
-        const tipGwei = process.env.TIP_GWEI || "15";
-        const priorityFee = ethers.parseUnits(tipGwei, "gwei");
-        const baseFee = feeData.maxFeePerGas || 0n;
-        const maxFeePerGas = baseFee > priorityFee ? baseFee : priorityFee * 2n;
-        const tx = await submitContract.mine(BigInt("0x" + nonce), {
-          gasLimit: 300000n,
-          maxFeePerGas,
-          maxPriorityFeePerGas: priorityFee,
-        });
-        state.tx = tx.hash;
-        render();
-        const receipt = await tx.wait();
-        state.status = "confirmed in block " + receipt.blockNumber;
-        const s = await fetchState(readContract, wallet.address);
-        applyState(s);
-        lastEpoch = s.epoch;
-      } catch (err) {
-        state.status = "error: " + (err.shortMessage || err.message);
-      }
-      submitting = false;
-      proc.stdin.write("UPDATE 0x" + state.challenge.slice(2) + " 0x" + state.targetHex + "\n");
-      state.totalHashes = 0;
-      state.searchStart = Date.now();
-      state.status = "searching";
-    }
-  });
-
-  proc.stderr.on("data", (data) => {
-    for (const line of data.toString().split("\n")) {
-      if (line.startsWith("PROGRESS:")) {
-        const parts = line.split(":");
-        state.hashrate = parseInt(parts[2]);
-        state.totalHashes = state.hashrate * ((Date.now() - state.searchStart) / 1000);
-      }
-    }
-  });
-
-  proc.on("exit", () => {
-    clearInterval(stateTimer);
-    clearInterval(renderTimer);
-    console.log("\nminer exited");
-    process.exit(1);
-  });
+function broadcastUpdate(workers, challenge, targetHex) {
+  const msg = "UPDATE 0x" + challenge.slice(2) + " 0x" + targetHex + "\n";
+  for (const w of workers) {
+    try { w.stdin.write(msg); } catch {}
+  }
 }
 
 function applyState(s) {
