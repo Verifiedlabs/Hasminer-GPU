@@ -3,6 +3,8 @@
 #include <string.h>
 #include <stdint.h>
 #include <time.h>
+#include <unistd.h>
+#include <fcntl.h>
 #include <cuda_runtime.h>
 
 typedef uint64_t u64;
@@ -231,7 +233,51 @@ int main(int argc, char *argv[]) {
     struct timespec t_now, t_last;
     clock_gettime(CLOCK_MONOTONIC, &t_last);
 
+    int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+    fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
+    char stdin_buf[4096];
+    int stdin_pos = 0;
+
     while (1) {
+        int n = read(STDIN_FILENO, stdin_buf + stdin_pos, sizeof(stdin_buf) - stdin_pos - 1);
+        if (n > 0) {
+            stdin_pos += n;
+            stdin_buf[stdin_pos] = 0;
+            char *nl;
+            while ((nl = strchr(stdin_buf, '\n')) != NULL) {
+                *nl = 0;
+                if (strncmp(stdin_buf, "UPDATE ", 7) == 0) {
+                    char *cl_hex = stdin_buf + 7;
+                    char *sp = strchr(cl_hex, ' ');
+                    if (sp) {
+                        *sp = 0;
+                        char *tg_hex = sp + 1;
+                        if (cl_hex[0]=='0' && cl_hex[1]=='x') cl_hex += 2;
+                        if (tg_hex[0]=='0' && tg_hex[1]=='x') tg_hex += 2;
+                        if (strlen(cl_hex) == 64 && strlen(tg_hex) == 64) {
+                            u8 nc[32], nt[32];
+                            for (int i = 0; i < 32; i++) nc[i] = (hb(cl_hex[i*2])<<4)|hb(cl_hex[i*2+1]);
+                            for (int i = 0; i < 32; i++) nt[i] = (hb(tg_hex[i*2])<<4)|hb(tg_hex[i*2+1]);
+                            c0 = load_u64_le(nc + 0);
+                            c1 = load_u64_le(nc + 8);
+                            c2 = load_u64_le(nc + 16);
+                            c3 = load_u64_le(nc + 24);
+                            t0 = load_u64_be(nt + 0);
+                            t1 = load_u64_be(nt + 8);
+                            t2 = load_u64_be(nt + 16);
+                            t3 = load_u64_be(nt + 24);
+                            fprintf(stderr, "UPDATED\n");
+                            fflush(stderr);
+                        }
+                    }
+                }
+                int remain = stdin_pos - ((nl - stdin_buf) + 1);
+                memmove(stdin_buf, nl + 1, remain);
+                stdin_pos = remain;
+                stdin_buf[stdin_pos] = 0;
+            }
+        }
+
         cudaMemcpy(d_result, &h_result, sizeof(Result), cudaMemcpyHostToDevice);
         mine_kernel<<<BLOCKS, THREADS>>>(c0, c1, c2, c3, t0, t1, t2, t3, nonce_base, d_result);
         cudaDeviceSynchronize();

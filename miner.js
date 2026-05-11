@@ -38,6 +38,56 @@ function short(hex, head = 6, tail = 4) {
   return s.slice(0, head + 2) + "…" + s.slice(-tail);
 }
 
+const state = {
+  era: 0n,
+  reward: 0n,
+  target: 0n,
+  targetHex: "",
+  minted: 0n,
+  remaining: 0n,
+  epoch: 0n,
+  epochBlocksLeft: 0n,
+  balance: 0n,
+  challenge: "",
+  hashrate: 0,
+  totalHashes: 0,
+  searchStart: Date.now(),
+  status: "starting",
+  tx: "—",
+};
+
+function render() {
+  const targetShort = state.targetHex
+    ? "0x" + state.targetHex.slice(0, 8) + "…" + state.targetHex.slice(-6)
+    : "—";
+  const epochTime = fmtDuration(Number(state.epochBlocksLeft) * 12);
+  const elapsed = (Date.now() - state.searchStart) / 1000;
+  const maxVal = BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+  const prob = state.target > 0n ? Number(state.target) / Number(maxVal) : 0;
+  const expected = prob > 0 ? 1 / prob : 0;
+  const remaining = Math.max(0, expected - state.totalHashes);
+  const eta = state.hashrate > 0 ? remaining / state.hashrate : 0;
+
+  const lines = [
+    "",
+    "  era:         " + state.era.toString(),
+    "  reward:      " + ethers.formatEther(state.reward) + " HASH",
+    "  difficulty:  " + targetShort,
+    "  epoch:       " + state.epoch.toString() + " (rotates in " + state.epochBlocksLeft.toString() + " blk ~" + epochTime + ")",
+    "  minted:      " + ethers.formatEther(state.minted) + " HASH",
+    "  remaining:   " + ethers.formatEther(state.remaining) + " HASH",
+    "  balance:     " + ethers.formatEther(state.balance) + " HASH",
+    "  challenge:   " + short(state.challenge, 10, 6),
+    "  tx:          " + state.tx,
+    "",
+    "  " + state.status + " · " + fmtHashrate(state.hashrate) + " · " +
+      fmtNumber(Math.floor(state.totalHashes)) + " hashes · " +
+      fmtDuration(elapsed) + " · ETA ~" + fmtDuration(eta),
+    "",
+  ];
+  process.stdout.write("\x1b[H\x1b[J" + lines.join("\n"));
+}
+
 async function main() {
   const privateKey = process.env.PRIVATE_KEY;
   if (!privateKey) {
@@ -50,7 +100,6 @@ async function main() {
     : new ethers.FallbackProvider([
         { provider: new ethers.JsonRpcProvider("https://ethereum.publicnode.com"), priority: 1, weight: 1 },
         { provider: new ethers.JsonRpcProvider("https://1rpc.io/eth"), priority: 2, weight: 1 },
-        { provider: new ethers.JsonRpcProvider("https://eth.drpc.org"), priority: 3, weight: 1 },
       ], 1);
 
   const submitRpc = process.env.SUBMIT_RPC || "https://rpc.flashbots.net/fast";
@@ -68,144 +117,140 @@ async function main() {
   console.log("  read rpc:   ", process.env.RPC_URL || "fallback");
   console.log("  submit rpc: ", submitRpc);
   console.log("─".repeat(60));
+  await new Promise(r => setTimeout(r, 1000));
 
-  await mineLoop(readContract, submitContract, readWallet, readProvider);
+  await run(readContract, submitContract, readWallet, readProvider);
 }
 
-async function mineLoop(readContract, submitContract, wallet, provider) {
-  while (true) {
+async function fetchState(contract, address) {
+  const [challenge, ms, balance] = await Promise.all([
+    contract.getChallenge(address),
+    contract.miningState(),
+    contract.balanceOf(address)
+  ]);
+  return {
+    challenge,
+    era: ms[0],
+    reward: ms[1],
+    target: ms[2],
+    minted: ms[3],
+    remaining: ms[4],
+    epoch: ms[5],
+    epochBlocksLeft: ms[6],
+    balance
+  };
+}
+
+async function run(readContract, submitContract, wallet, provider) {
+  let initial = await fetchState(readContract, wallet.address);
+  applyState(initial);
+  state.status = "searching";
+  state.searchStart = Date.now();
+  state.totalHashes = 0;
+  render();
+
+  const proc = spawn(BINARY, [initial.challenge, "0x" + state.targetHex]);
+
+  let submitting = false;
+  let lastEpoch = state.epoch;
+
+  const renderTimer = setInterval(render, 500);
+
+  const stateTimer = setInterval(async () => {
     try {
-      const [challenge, state, balance] = await Promise.all([
-        readContract.getChallenge(wallet.address),
-        readContract.miningState(),
-        readContract.balanceOf(wallet.address)
-      ]);
-
-      const era = state[0];
-      const reward = state[1];
-      const target = state[2];
-      const minted = state[3];
-      const remaining = state[4];
-      const epoch = state[5];
-      const epochBlocksLeft = state[6];
-      const targetHex = target.toString(16).padStart(64, "0");
-
-      console.log();
-      console.log("  era:         ", era.toString());
-      console.log("  reward:      ", ethers.formatEther(reward), "HASH");
-      console.log("  difficulty:  ", "0x" + targetHex.slice(0, 8) + "…" + targetHex.slice(-6));
-      console.log("  epoch:       ", epoch.toString(), "(rotates in", epochBlocksLeft.toString(), "blk ~" + fmtDuration(Number(epochBlocksLeft) * 12) + ")");
-      console.log("  minted:      ", ethers.formatEther(minted), "HASH");
-      console.log("  remaining:   ", ethers.formatEther(remaining), "HASH");
-      console.log("  balance:     ", ethers.formatEther(balance), "HASH");
-      console.log("  challenge:   ", short(challenge, 10, 6));
-      console.log();
-
-      const nonce = await bruteForce(challenge, targetHex, epoch, readContract);
-      if (!nonce) {
-        console.log("  ↻ epoch rotated, restarting...");
-        continue;
+      const s = await fetchState(readContract, wallet.address);
+      applyState(s);
+      if (s.epoch.toString() !== lastEpoch.toString() && !submitting) {
+        lastEpoch = s.epoch;
+        proc.stdin.write("UPDATE 0x" + s.challenge.slice(2) + " 0x" + state.targetHex + "\n");
+        state.totalHashes = 0;
+        state.searchStart = Date.now();
       }
-      console.log();
-      console.log("  ✓ FOUND: 0x" + nonce.slice(0, 16) + "…" + nonce.slice(-12));
+    } catch {}
+  }, 12000);
 
-      const currentState = await readContract.miningState();
-      const currentEpoch = currentState[5];
-      if (currentEpoch.toString() !== epoch.toString()) {
-        console.log("  ✗ epoch rotated before submit, skipping...");
-        continue;
-      }
-
-      console.log("  ⚡ submitting via private mempool...");
-
-      const feeData = await provider.getFeeData();
-      const tipGwei = process.env.TIP_GWEI || "15";
-      const priorityFee = ethers.parseUnits(tipGwei, "gwei");
-      const baseFee = feeData.maxFeePerGas || 0n;
-      const maxFeePerGas = baseFee > priorityFee ? baseFee : priorityFee * 2n;
-
-      const tx = await submitContract.mine(BigInt("0x" + nonce), {
-        gasLimit: 300000n,
-        maxFeePerGas,
-        maxPriorityFeePerGas: priorityFee,
-      });
-      console.log("  tx:          ", tx.hash);
-      console.log("  waiting for confirmation...");
-
-      const receipt = await tx.wait();
-      console.log();
-      console.log("  ✓ CONFIRMED in block", receipt.blockNumber);
-
-      const newBalance = await readContract.balanceOf(wallet.address);
-      console.log("  balance:     ", ethers.formatEther(newBalance), "HASH (+" + ethers.formatEther(reward) + ")");
-    } catch (err) {
-      console.log();
-      console.error("  ✗ error:", err.shortMessage || err.message);
-      if (err.info) console.error("  rpc info:", JSON.stringify(err.info?.error || err.info, null, 2));
-      await sleep(5000);
-    }
-  }
-}
-
-function bruteForce(challenge, targetHex, epoch, contract) {
-  return new Promise((resolve, reject) => {
-    let done = false;
-    const startTime = Date.now();
-    let currentHps = 0;
-
-    const target = BigInt("0x" + targetHex);
-    const maxVal = BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
-    const probability = Number(target) / Number(maxVal);
-
-    const proc = spawn(BINARY, [challenge, "0x" + targetHex]);
-
-    const epochChecker = setInterval(async () => {
+  proc.stdout.on("data", async (data) => {
+    for (const line of data.toString().split("\n")) {
+      if (!line.startsWith("FOUND:")) continue;
+      if (submitting) continue;
+      submitting = true;
+      const nonce = line.slice(6);
+      state.status = "submitting";
+      render();
       try {
-        const state = await contract.miningState();
-        const currentEpoch = state[5];
-        if (currentEpoch.toString() !== epoch.toString() && !done) {
-          done = true;
-          clearInterval(epochChecker);
-          proc.kill();
-          resolve(null);
+        const currentState = await readContract.miningState();
+        if (currentState[5].toString() !== state.epoch.toString()) {
+          state.status = "epoch rotated before submit, skipping";
+          submitting = false;
+          const s = await fetchState(readContract, wallet.address);
+          applyState(s);
+          lastEpoch = s.epoch;
+          proc.stdin.write("UPDATE 0x" + s.challenge.slice(2) + " 0x" + state.targetHex + "\n");
+          state.totalHashes = 0;
+          state.searchStart = Date.now();
+          state.status = "searching";
+          return;
         }
-      } catch {}
-    }, 12000);
-
-    proc.stdout.on("data", (data) => {
-      const line = data.toString().trim();
-      if (line.startsWith("FOUND:") && !done) {
-        done = true;
-        clearInterval(epochChecker);
-        proc.kill();
-        resolve(line.slice(6));
+        const feeData = await provider.getFeeData();
+        const tipGwei = process.env.TIP_GWEI || "15";
+        const priorityFee = ethers.parseUnits(tipGwei, "gwei");
+        const baseFee = feeData.maxFeePerGas || 0n;
+        const maxFeePerGas = baseFee > priorityFee ? baseFee : priorityFee * 2n;
+        const tx = await submitContract.mine(BigInt("0x" + nonce), {
+          gasLimit: 300000n,
+          maxFeePerGas,
+          maxPriorityFeePerGas: priorityFee,
+        });
+        state.tx = tx.hash;
+        render();
+        const receipt = await tx.wait();
+        state.status = "confirmed in block " + receipt.blockNumber;
+        const s = await fetchState(readContract, wallet.address);
+        applyState(s);
+        lastEpoch = s.epoch;
+      } catch (err) {
+        state.status = "error: " + (err.shortMessage || err.message);
       }
-    });
+      submitting = false;
+      proc.stdin.write("UPDATE 0x" + state.challenge.slice(2) + " 0x" + state.targetHex + "\n");
+      state.totalHashes = 0;
+      state.searchStart = Date.now();
+      state.status = "searching";
+    }
+  });
 
-    proc.stderr.on("data", (data) => {
-      const str = data.toString();
-      for (const line of str.split("\n")) {
-        if (line.startsWith("PROGRESS:")) {
-          const parts = line.split(":");
-          currentHps = parseInt(parts[2]);
-          const elapsedSec = (Date.now() - startTime) / 1000;
-          const totalHashes = currentHps * elapsedSec;
-          const expectedHashes = 1 / probability;
-          const remainingHashes = Math.max(0, expectedHashes - totalHashes);
-          const etaSec = currentHps > 0 ? remainingHashes / currentHps : 0;
-          process.stdout.write(
-            `\r  searching · ${fmtHashrate(currentHps)} · ${fmtNumber(Math.floor(totalHashes))} hashes · ${fmtDuration(elapsedSec)} · ETA ~${fmtDuration(etaSec)}     `
-          );
-        }
+  proc.stderr.on("data", (data) => {
+    for (const line of data.toString().split("\n")) {
+      if (line.startsWith("PROGRESS:")) {
+        const parts = line.split(":");
+        state.hashrate = parseInt(parts[2]);
+        state.totalHashes = state.hashrate * ((Date.now() - state.searchStart) / 1000);
       }
-    });
+    }
+  });
 
-    proc.on("error", reject);
+  proc.on("exit", () => {
+    clearInterval(stateTimer);
+    clearInterval(renderTimer);
+    console.log("\nminer exited");
+    process.exit(1);
   });
 }
 
-function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
+function applyState(s) {
+  state.era = s.era;
+  state.reward = s.reward;
+  state.target = s.target;
+  state.targetHex = s.target.toString(16).padStart(64, "0");
+  state.minted = s.minted;
+  state.remaining = s.remaining;
+  state.epoch = s.epoch;
+  state.epochBlocksLeft = s.epochBlocksLeft;
+  state.balance = s.balance;
+  state.challenge = s.challenge;
 }
 
-main().catch(console.error);
+main().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
